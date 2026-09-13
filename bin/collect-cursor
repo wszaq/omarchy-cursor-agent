@@ -1,0 +1,3 @@
+#!/bin/sh
+# Launcher; keeps the documented CLI path stable.
+exec "$(dirname "$0")/collect_cursor.py" "$@"

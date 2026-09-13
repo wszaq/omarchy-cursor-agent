@@ -97,6 +97,7 @@ class AggregationTests(unittest.TestCase):
       cursor_root=self.cursor,
       usage_dir=self.usage,
       write=True,
+      access_token="",
     )
     self.assertIsNotNone(record)
     assert record is not None
@@ -110,7 +111,6 @@ class AggregationTests(unittest.TestCase):
     self.assertEqual(record["limits"], [])
     self.assertEqual(len(record["recentDays"]), 7)
     self.assertTrue((self.usage / "cursor.json").is_file())
-    self.assertIn("composer-2", record["modelUsage"])
 
   def test_provider_disabled_skips_write(self) -> None:
     cid = "22222222-2222-2222-2222-222222222222"
@@ -132,25 +132,46 @@ class AggregationTests(unittest.TestCase):
     cc.shell_json_path = lambda: shell  # type: ignore[assignment]
     self.addCleanup(lambda: setattr(cc, "shell_json_path", original))
 
-    record = cc.collect(cursor_root=self.cursor, usage_dir=self.usage, write=True)
+    record = cc.collect(
+      cursor_root=self.cursor,
+      usage_dir=self.usage,
+      write=True,
+      access_token="",
+    )
     self.assertIsNone(record)
     self.assertFalse((self.usage / "cursor.json").exists())
 
   def test_no_cursor_home_returns_none(self) -> None:
     missing = self.root / "missing-cursor"
-    record = cc.collect(cursor_root=missing, usage_dir=self.usage, write=True)
+    record = cc.collect(
+      cursor_root=missing,
+      usage_dir=self.usage,
+      write=True,
+      access_token="",
+    )
     self.assertIsNone(record)
 
 
 class BuildRecordTests(unittest.TestCase):
-  def test_recent_days_are_zero_tokens(self) -> None:
+  def test_recent_days_include_token_totals(self) -> None:
     stats = {
       "prompts_by_day": {"2026-09-13": 2},
       "sessions_by_day": {"2026-09-13": {"abc"}},
+      "tokens_by_day": {"2026-09-13": 12345},
       "all_sessions": {"abc"},
       "total_prompts": 2,
       "active_dates": ["2026-09-13"],
-      "model_usage": {},
+      "model_usage": {
+        "default": {
+          "inputTokens": 100,
+          "outputTokens": 20,
+          "cacheReadInputTokens": 50,
+          "cacheCreationInputTokens": 0,
+        }
+      },
+      "today_tokens_by_model": {"default": 12345},
+      "limits": [{"label": "Included usage", "percent": 0.2, "resetsAt": ""}],
+      "balance": None,
     }
     record = cc.build_record(
       stats,
@@ -162,7 +183,44 @@ class BuildRecordTests(unittest.TestCase):
     )
     self.assertEqual(record["tierLabel"], "Pro")
     self.assertEqual(record["todayPrompts"], 2)
-    self.assertTrue(all(day["messageCount"] == 0 for day in record["recentDays"]))
+    self.assertEqual(record["todayTotalTokens"], 12345)
+    self.assertEqual(record["todayTokensByModel"]["default"], 12345)
+    today = next(day for day in record["recentDays"] if day["date"] == "2026-09-13")
+    self.assertEqual(today["messageCount"], 12345)
+    self.assertEqual(record["limits"][0]["percent"], 0.2)
+
+
+class DashboardMergeTests(unittest.TestCase):
+  def test_merge_prefers_dashboard_tokens(self) -> None:
+    transcripts = {
+      "prompts_by_day": {"2026-09-13": 2},
+      "sessions_by_day": {"2026-09-13": {"local"}},
+      "all_sessions": {"local"},
+      "total_prompts": 2,
+    }
+    tracking = {"sessions_by_day": {}, "requests_by_day": {}}
+    dashboard = {
+      "tokens_by_day": {"2026-09-13": 999},
+      "prompts_by_day": {"2026-09-13": 5},
+      "sessions_by_day": {"2026-09-13": {"api"}},
+      "model_usage": {
+        "default": {
+          "inputTokens": 1,
+          "outputTokens": 2,
+          "cacheReadInputTokens": 3,
+          "cacheCreationInputTokens": 0,
+        }
+      },
+      "today_tokens_by_model": {"default": 999},
+      "limits": [{"label": "Included usage", "percent": 0.5, "resetsAt": ""}],
+      "balance": {"remaining": 0, "funded": 20, "spent": 20, "currency": "USD", "estimated": False},
+    }
+    stats = cc.merge_stats(transcripts, tracking, dashboard)
+    self.assertEqual(stats["tokens_by_day"]["2026-09-13"], 999)
+    self.assertEqual(stats["prompts_by_day"]["2026-09-13"], 5)
+    self.assertIn("api", stats["sessions_by_day"]["2026-09-13"])
+    self.assertEqual(stats["model_usage"]["default"]["inputTokens"], 1)
+    self.assertEqual(stats["limits"][0]["percent"], 0.5)
 
 
 if __name__ == "__main__":

@@ -10,9 +10,12 @@ no separate bar widget.
 
 | Field | Source |
 |-------|--------|
-| Sessions / prompts / active days | `~/.cursor/projects/*/agent-transcripts/**/*.jsonl` plus `~/.cursor/ai-tracking/ai-code-tracking.db` |
-| Plan tier | `cursor-agent about` (`Subscription Tier`) |
-| Limits / tokens | Not available locally — quota is on [cursor.com/dashboard/spending](https://cursor.com/dashboard/spending) |
+| Sessions / prompts / active days | Local transcripts + `ai-code-tracking.db`, enriched by dashboard usage events |
+| Tokens by day / by model | Cursor dashboard API (`GetFilteredUsageEvents`, `GetAggregatedUsageEvents`) via the IDE access token in `state.vscdb` |
+| Included-usage limits | `GetCurrentPeriodUsage` (percent of included pool + billing-cycle reset) |
+| Plan tier | `GetPlanInfo` / `cursor-agent about` |
+
+Open Cursor at least once while signed in so `~/.config/Cursor/User/globalStorage/state.vscdb` has an access token. Without that token the panel still shows local prompt/session counts, but tokens and limits stay empty.
 
 ## Install
 

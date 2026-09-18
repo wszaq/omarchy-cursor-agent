@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "wszaq.cursor-agent",
   "name": "Cursor agent usage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "wszaq",
   "license": "MIT",
   "description": "Collects Cursor IDE/CLI activity into a stock omarchy.agents usage record so Cursor appears alongside Claude and Codex.",

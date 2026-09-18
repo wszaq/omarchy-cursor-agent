@@ -69,6 +69,7 @@ rm -f ~/.local/state/omarchy/agents/usage/cursor.json
 - Cursor IDE signed in on this machine (for token/limit API), and/or local `~/.cursor` transcripts
 
 No install hooks, no sudo, no network except the Cursor dashboard API when an IDE access token is present.
+Each dashboard response is streamed under an 8 MiB ceiling (oversized `Content-Length` is refused before reading) alongside the 20 s timeout, and parsed usage events/aggregations are capped before they accumulate, so a compromised endpoint cannot grow the long-lived service.
 
 ## Development
 

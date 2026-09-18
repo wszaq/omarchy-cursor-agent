@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import sys
@@ -37,6 +38,81 @@ class ParseAboutTests(unittest.TestCase):
   def test_colon_form(self) -> None:
     fields = cc.parse_about("Subscription Tier: Ultra\n")
     self.assertEqual(fields.get("subscription tier"), "Ultra")
+
+
+class FakeResponse:
+  """Minimal urlopen stand-in that streams a body in fixed chunks."""
+
+  def __init__(self, body: bytes, declared: str | None = None) -> None:
+    self.buffer = io.BytesIO(body)
+    self.headers = {} if declared is None else {"Content-Length": declared}
+
+  def read(self, size: int = -1) -> bytes:
+    return self.buffer.read(size)
+
+
+class ResponseCapTests(unittest.TestCase):
+  def test_small_body_read_whole(self) -> None:
+    body = json.dumps({"ok": True}).encode("utf-8")
+    response = FakeResponse(body, declared=str(len(body)))
+    self.assertEqual(cc.read_capped(response, 1024, "Test"), body)
+
+  def test_oversized_content_length_rejected_before_read(self) -> None:
+    response = FakeResponse(b"x" * 10, declared="99999")
+    with self.assertRaises(ValueError):
+      cc.read_capped(response, 1024, "Test")
+    self.assertEqual(response.buffer.tell(), 0)
+
+  def test_unbounded_body_stops_at_limit(self) -> None:
+    response = FakeResponse(b"x" * 5000)
+    with self.assertRaises(ValueError):
+      cc.read_capped(response, 1024, "Test")
+    self.assertLessEqual(response.buffer.tell(), 1025)
+
+  def test_body_exactly_at_limit_accepted(self) -> None:
+    response = FakeResponse(b"y" * 1024)
+    self.assertEqual(len(cc.read_capped(response, 1024, "Test")), 1024)
+
+
+class DashboardBoundsTests(unittest.TestCase):
+  def _patch(self, name: str, value) -> None:
+    original = getattr(cc, name)
+    setattr(cc, name, value)
+    self.addCleanup(lambda: setattr(cc, name, original))
+
+  def test_aggregations_truncated(self) -> None:
+    self._patch("AGGREGATIONS_MAX", 3)
+
+    def fake_post(token, method, payload=None):
+      if method == "GetAggregatedUsageEvents":
+        return {"aggregations": [{"modelIntent": f"m{i}"} for i in range(50)]}
+      return {}
+
+    self._patch("dashboard_post", fake_post)
+    result = cc.fetch_dashboard_usage("token")
+    self.assertEqual(len(result["model_usage"]), 3)
+
+  def test_events_capped_across_pages(self) -> None:
+    self._patch("EVENTS_MAX_TOTAL", 5)
+    now_ms = int(datetime.now().timestamp() * 1000)
+    calls: list[int] = []
+
+    def fake_post(token, method, payload=None):
+      if method == "GetFilteredUsageEvents":
+        calls.append(int((payload or {}).get("page", 0)))
+        return {
+          "usageEventsDisplay": [
+            {"timestamp": now_ms, "model": "composer-2", "tokenUsage": {"inputTokens": 1}}
+            for _ in range(20)
+          ]
+        }
+      return {}
+
+    self._patch("dashboard_post", fake_post)
+    result = cc.fetch_dashboard_usage("token")
+    today = cc.date_string(cc.local_today())
+    self.assertEqual(result["prompts_by_day"][today], 5)
+    self.assertEqual(calls, [1])
 
 
 class AggregationTests(unittest.TestCase):

@@ -36,9 +36,13 @@ SHELL_JSON_GUARD = 64 * 1024 * 1024
 ABOUT_TIMEOUT_S = 8
 STATUS_TIMEOUT_S = 5
 API_TIMEOUT_S = 20
+API_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+API_READ_CHUNK_BYTES = 64 * 1024
 DASHBOARD_BASE = "https://api2.cursor.sh/aiserver.v1.DashboardService"
 EVENTS_PAGE_SIZE = 100
 EVENTS_MAX_PAGES = 30
+EVENTS_MAX_TOTAL = EVENTS_PAGE_SIZE * EVENTS_MAX_PAGES
+AGGREGATIONS_MAX = 500
 
 UUID_RE = re.compile(
   r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -273,6 +277,30 @@ def read_access_token() -> str | None:
   return token or None
 
 
+def read_capped(response: Any, limit: int, label: str) -> bytes:
+  """Read at most `limit` bytes; reject an oversized declared or streamed body."""
+  declared = response.headers.get("Content-Length") if hasattr(response, "headers") else None
+  if declared:
+    try:
+      declared_bytes = int(str(declared).strip())
+    except ValueError:
+      declared_bytes = -1
+    if declared_bytes > limit:
+      raise ValueError(f"{label} declares {declared_bytes} bytes; limit is {limit}")
+
+  chunks: list[bytes] = []
+  total = 0
+  while total <= limit:
+    chunk = response.read(min(API_READ_CHUNK_BYTES, limit + 1 - total))
+    if not chunk:
+      break
+    total += len(chunk)
+    if total > limit:
+      raise ValueError(f"{label} exceeds the {limit} byte response limit")
+    chunks.append(chunk)
+  return b"".join(chunks)
+
+
 def dashboard_post(token: str, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
   url = f"{DASHBOARD_BASE}/{method}"
   body = json.dumps(payload or {}).encode("utf-8")
@@ -288,7 +316,7 @@ def dashboard_post(token: str, method: str, payload: dict[str, Any] | None = Non
     },
   )
   with urllib.request.urlopen(request, timeout=API_TIMEOUT_S) as response:
-    raw = response.read()
+    raw = read_capped(response, API_MAX_RESPONSE_BYTES, method)
   if not raw:
     return {}
   parsed = json.loads(raw)
@@ -351,7 +379,11 @@ def fetch_dashboard_usage(token: str, today: dt.date | None = None) -> dict[str,
 
   try:
     agg = dashboard_post(token, "GetAggregatedUsageEvents")
-    aggregations = list(agg.get("aggregations") or [])
+    raw_aggregations = agg.get("aggregations")
+    if isinstance(raw_aggregations, list):
+      aggregations = raw_aggregations[:AGGREGATIONS_MAX]
+      if len(raw_aggregations) > AGGREGATIONS_MAX:
+        log(f"GetAggregatedUsageEvents truncated to {AGGREGATIONS_MAX} aggregations")
   except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
     log(f"GetAggregatedUsageEvents failed: {exc}")
 
@@ -362,10 +394,15 @@ def fetch_dashboard_usage(token: str, today: dt.date | None = None) -> dict[str,
         "GetFilteredUsageEvents",
         {"page": page, "pageSize": EVENTS_PAGE_SIZE},
       )
-      batch = list(payload.get("usageEventsDisplay") or [])
+      raw_batch = payload.get("usageEventsDisplay")
+      batch = raw_batch[:EVENTS_PAGE_SIZE] if isinstance(raw_batch, list) else []
       if not batch:
         break
-      events.extend(batch)
+      room = EVENTS_MAX_TOTAL - len(events)
+      events.extend(batch[:room])
+      if len(events) >= EVENTS_MAX_TOTAL:
+        log(f"GetFilteredUsageEvents stopped at {EVENTS_MAX_TOTAL} events")
+        break
       oldest_in_page = None
       for event in batch:
         event_day = timestamp_to_date(event.get("timestamp"))
